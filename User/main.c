@@ -1265,8 +1265,8 @@ void SelfTest_Run(void) {
         OLED_Clear();
         OLED_ShowString(0, 0, "Self Test");
         OLED_ShowString(0, 2, "Door is closed");
-        OLED_ShowString(0, 3, "Press Button2");
-        OLED_ShowString(0, 4, "to open it first");
+        OLED_ShowString(0, 3, "*Press Button2 to");
+        OLED_ShowString(0, 4, " open it first");
         Beeper_PlayPattern(BEEP_NEED_OPEN_ON, BEEP_NEED_OPEN_OFF, BEEP_NEED_OPEN_CNT);
         delay_ms(SELFTEST_DOOR_CLOSED_MS);
 
