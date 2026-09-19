@@ -9,6 +9,8 @@
  *          蜂鸣器三档：关仓未发射心跳式哔哔响，关仓已发射三连哔，开仓后持续响
  *          倾斜保险增加角速度条件，防止振动误触发
  *          最高点检测更灵敏，增加零速修正防止积分漂移
+ *          新增：按钮1(PB0)按住哔哔响，听到2声后松手触发系统自检
+ *          自检中短按按钮1需二次确认才退出
  */
 
 #include "stm32f10x.h"
@@ -36,6 +38,11 @@
 
 #define BUTTON_GPIO_PORT        GPIOA       // 按钮3（校准触发）
 #define BUTTON_GPIO_PIN         GPIO_Pin_8
+
+/* === SelfTest 新增：按钮1（自检触发） === */
+#define BUTTON1_GPIO_PORT       GPIOB
+#define BUTTON1_GPIO_PIN        GPIO_Pin_0
+/* ========================================= */
 
 #define BEEPER_GPIO_PORT        GPIOB
 #define BEEPER_GPIO_PIN         GPIO_Pin_12
@@ -109,6 +116,53 @@ int8_t gyro_sign_z  = 1;
 // ---------- 蜂鸣器心跳 ----------
 #define BEEP_PERIOD_MS          1000    // 关仓慢滴周期
 #define BEEP_DURATION_MS        100     // 每次持续时间
+
+/* === SelfTest 新增：自检阈值与提示音参数 === */
+#define SELFTEST_SAMPLES            50      // 自检采样次数
+#define SELFTEST_ACCEL_MIN_G        0.80f   // 加速度模长下限(g)
+#define SELFTEST_ACCEL_MAX_G        1.20f   // 加速度模长上限(g)
+#define SELFTEST_GYRO_BIAS_LIMIT    10.0f   // 陀螺仪零偏模长阈值(°/s)
+#define SELFTEST_HOLD_STILL_MS      1500    // 自检开始前静止提示时间(ms)
+#define SELFTEST_ITEM_RESULT_MS     400     // 单项结果停留时间(ms)
+#define SELFTEST_END_PASS_MS        2500    // 全部通过停留时间(ms)
+#define SELFTEST_END_FAIL_MS        3000    // 有失败停留时间(ms)
+#define SELFTEST_DOOR_CLOSED_MS     3000    // 未开仓提示停留时间(ms)
+
+// 按钮1按住蜂鸣参数
+#define B1_BEEP_ON_MS               80      // 每声蜂鸣持续时间
+#define B1_BEEP_GAP_MS              420     // 两声蜂鸣之间的间隔
+#define B1_BEEP_MIN_TRIGGER         2       // 至少听到2声才触发
+#define B1_BEEP_MAX                 8       // 最多响8声
+
+// 自检确认退出参数
+#define SELFTEST_CONFIRM_WINDOW_MS  3000    // 二次确认等待时间
+#define SELFTEST_SUPPRESS_MS        1000    // 按钮按住超过1秒视为误触
+
+// 蜂鸣器自检专用提示音（不与原有三档重复）
+#define BEEP_START_ON        50
+#define BEEP_START_OFF       50
+#define BEEP_START_CNT       3
+
+#define BEEP_PASS_ON         60
+#define BEEP_FAIL_ON         80
+#define BEEP_FAIL_OFF        80
+#define BEEP_FAIL_CNT        2
+
+#define BEEP_END_OK_ON       200
+#define BEEP_END_OK_OFF      100
+#define BEEP_END_OK_CNT      2
+
+#define BEEP_END_NG_ON       300
+#define BEEP_END_NG_OFF      100
+#define BEEP_END_NG_CNT      3
+
+#define BEEP_NEED_OPEN_ON    500
+#define BEEP_NEED_OPEN_OFF   200
+#define BEEP_NEED_OPEN_CNT   2
+
+#define BEEP_CANCEL_ON       400
+#define BEEP_CANCEL_CNT      1
+/* ============================================ */
 
 // ---------- OLED 显示文字 ----------
 const char* DISPLAY_ROCKET_NAME = " AHU.UniversityRocket";
@@ -213,6 +267,19 @@ void Beeper_Init(void);
 void Beeper_On(void);
 void Beeper_Off(void);
 void Beeper_Update(void);
+
+/* === SelfTest 新增：函数声明 === */
+void Button1_Init(void);
+uint8_t Button1_IsDown(void);
+uint8_t Button1_Process(void);   // 返回1表示当前占用蜂鸣器
+
+void Beeper_PlayPattern(uint16_t on_ms, uint16_t off_ms, uint8_t count);
+void FlightState_Reset(void);
+
+uint8_t SelfTest_CheckCancel(void);
+void SelfTest_Cancel(void);
+void SelfTest_Run(void);
+/* ==================================== */
 
 // ==================== 延时函数 ====================
 void delay_ms(uint32_t ms) {
@@ -810,6 +877,26 @@ static void NeuroPID_Reset(void) {
 #endif
 }
 
+/* === SelfTest 新增：飞行状态复位 === */
+void FlightState_Reset(void) {
+    vertical_velocity = 0.0f;
+    vertical_position = 0.0f;
+    max_up_accel = 0.0f;
+    max_height = 0.0f;
+    launched = 0;
+    apogee_reached = 0;
+    safety_deadline_ms = 0;
+    tilt_triggered = 0;
+
+    roll_angle = 0.0f;
+    pitch_angle = 0.0f;
+    gyro_rate_x_deg = 0.0f;
+    gyro_rate_y_deg = 0.0f;
+
+    NeuroPID_Reset();
+}
+/* =================================== */
+
 // ==================== 舵机控制 ====================
 void Servo_Init(void) {
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -977,6 +1064,17 @@ void Beeper_Update(void) {
     }
 }
 
+/* === SelfTest 新增：阻塞式蜂鸣器播放 === */
+void Beeper_PlayPattern(uint16_t on_ms, uint16_t off_ms, uint8_t count) {
+    for (uint8_t i = 0; i < count; i++) {
+        Beeper_On();
+        delay_ms(on_ms);
+        Beeper_Off();
+        if (i < count - 1) delay_ms(off_ms);
+    }
+}
+/* =========================================== */
+
 // ==================== 按钮 ====================
 void Button2_Init(void) {
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -1026,6 +1124,336 @@ uint8_t Button_IsPressed(void) {
     return 0;
 }
 
+/* === SelfTest 新增：按钮1初始化、读电平、主循环处理 === */
+void Button1_Init(void) {
+    GPIO_InitTypeDef GPIO_InitStructure;
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+    GPIO_InitStructure.GPIO_Pin = BUTTON1_GPIO_PIN;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(BUTTON1_GPIO_PORT, &GPIO_InitStructure);
+}
+
+uint8_t Button1_IsDown(void) {
+    return GPIO_ReadInputDataBit(BUTTON1_GPIO_PORT, BUTTON1_GPIO_PIN) == 0;
+}
+
+static uint32_t b1_next_beep_at   = 0;
+static uint8_t  b1_pressed_flag   = 0;
+static uint8_t  b1_beep_count     = 0;
+
+/*
+ * 按钮1按住逻辑：
+ *   按下瞬间响第一声，之后每 500ms 响一声（80ms 响 + 420ms 停）。
+ *   松手时若累计响过 >= 2 声 → 触发自检。
+ *   返回值：1 表示当前正在占用蜂鸣器（主循环跳过 Beeper_Update）。
+ */
+uint8_t Button1_Process(void) {
+    uint8_t cur = Button1_IsDown();
+
+    if (cur && !b1_pressed_flag) {
+        // 刚按下
+        b1_pressed_flag = 1;
+        b1_beep_count = 0;
+        b1_next_beep_at = sysTick_ms;      // 立即响第一声
+    }
+
+    if (cur) {
+        // 到时间就响一声
+        if ((int32_t)(sysTick_ms - b1_next_beep_at) >= 0 && b1_beep_count < B1_BEEP_MAX) {
+            Beeper_On();
+            delay_ms(B1_BEEP_ON_MS);
+            Beeper_Off();
+            b1_beep_count++;
+            b1_next_beep_at = sysTick_ms + B1_BEEP_GAP_MS;
+        }
+        return 1;   // 占用蜂鸣器
+    } else {
+        // 松手
+        if (b1_pressed_flag) {
+            b1_pressed_flag = 0;
+
+            // 强制蜂鸣器状态机重新同步
+            beep_mode_cur = 0xFF;
+            beep_phase = 0;
+            beep_phase_start = sysTick_ms;
+
+            if (b1_beep_count >= B1_BEEP_MIN_TRIGGER && b1_beep_count <= B1_BEEP_MAX) {
+                SelfTest_Run();
+            }
+        }
+        return 0;
+    }
+}
+/* =================================================== */
+
+/* === SelfTest 新增：自检相关函数 === */
+
+/*
+ * 自检中检测取消：
+ *   第一次短按按钮1 → 显示 "Press B1 confirm"，等 3 秒。
+ *   3 秒内再按一次 → 返回 1，调用方执行取消。
+ *   3 秒内没按 → 清提示，返回 0，自检继续。
+ *   按钮按住超过 1 秒 → 视为误触，忽略，且本次按住不再触发确认。
+ */
+uint8_t SelfTest_CheckCancel(void) {
+    static uint8_t suppress_until_release = 0;
+
+    if (suppress_until_release) {
+        if (Button1_IsDown()) return 0;
+        suppress_until_release = 0;
+        return 0;
+    }
+
+    if (!Button1_IsDown()) return 0;
+
+    // 第一次按下，等待松开（最多 1 秒）
+    uint32_t start = sysTick_ms;
+    while (Button1_IsDown() && (sysTick_ms - start) < SELFTEST_SUPPRESS_MS) {
+        delay_ms(10);
+    }
+
+    if (Button1_IsDown()) {
+        // 按住超过 1 秒，视为误触
+        suppress_until_release = 1;
+        return 0;
+    }
+
+    // 在 1 秒内松开了 → 询问确认
+    OLED_ShowString(0, 1, "Press B1 confirm");
+
+    start = sysTick_ms;
+    while ((sysTick_ms - start) < SELFTEST_CONFIRM_WINDOW_MS) {
+        if (Button1_IsDown()) {
+            while (Button1_IsDown()) delay_ms(10);
+            OLED_ShowString(0, 1, "                ");
+            return 1;
+        }
+        delay_ms(10);
+    }
+
+    // 超时未确认
+    OLED_ShowString(0, 1, "                ");
+    return 0;
+}
+
+void SelfTest_Cancel(void) {
+    // 取消提示音
+    Beeper_PlayPattern(BEEP_CANCEL_ON, 0, BEEP_CANCEL_CNT);
+
+    // 舵机3回到开仓位置
+    Servo3_SetAngle(SERVO3_ANGLE_OPEN);
+    servo3_state = 1;
+
+    // 恢复姿态显示
+    roll_angle = 0.0f;
+    pitch_angle = 0.0f;
+    gyro_rate_x_deg = 0.0f;
+    gyro_rate_y_deg = 0.0f;
+
+    // 强制蜂鸣器状态机重新同步
+    beep_mode_cur = 0xFF;
+    beep_phase = 0;
+    beep_phase_start = sysTick_ms;
+
+    OLED_Clear();
+}
+
+void SelfTest_Run(void) {
+    // ---------- 前置条件：必须已开仓 ----------
+    if (servo3_state != 1) {
+        OLED_Clear();
+        OLED_ShowString(0, 0, "Self Test");
+        OLED_ShowString(0, 2, "Door is closed");
+        OLED_ShowString(0, 3, "Press Button2");
+        OLED_ShowString(0, 4, "to open it first");
+        Beeper_PlayPattern(BEEP_NEED_OPEN_ON, BEEP_NEED_OPEN_OFF, BEEP_NEED_OPEN_CNT);
+        delay_ms(SELFTEST_DOOR_CLOSED_MS);
+
+        beep_mode_cur = 0xFF;
+        beep_phase = 0;
+        beep_phase_start = sysTick_ms;
+        OLED_Clear();
+        return;
+    }
+
+    // ---------- 开始信号 ----------
+    Beeper_PlayPattern(BEEP_START_ON, BEEP_START_OFF, BEEP_START_CNT);
+
+    OLED_Clear();
+    OLED_ShowString(0, 0, "Self Test");
+    OLED_ShowString(0, 1, "Hold still...");
+
+    // 给用户 1.5 秒停手
+    for (uint16_t i = 0; i < SELFTEST_HOLD_STILL_MS / 50; i++) {
+        if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+        delay_ms(50);
+    }
+
+    // 清掉静止提示，避免和 MPU 项重叠
+    OLED_ShowString(0, 1, "                ");
+
+    uint8_t fail_count = 0;
+    char    fail_names[5][12];
+    memset(fail_names, 0, sizeof(fail_names));
+
+    int16_t ax, ay, az, gx, gy, gz;
+    int32_t sum_ax = 0, sum_ay = 0, sum_az = 0;
+    int32_t sum_gx = 0, sum_gy = 0, sum_gz = 0;
+    char buf[24];
+
+    // ---------- 第1项：MPU6050 I2C / WHO_AM_I ----------
+    OLED_ShowString(0, 2, "MPU6050: ...    ");
+    uint8_t whoami = 0;
+    I2C_Read(MPU6050_ADDR, 0x75, &whoami, 1);
+
+    if (whoami == 0x00 || whoami == 0xFF) {
+        OLED_ShowString(0, 2, "MPU6050: FAIL   ");
+        Beeper_PlayPattern(BEEP_FAIL_ON, BEEP_FAIL_OFF, BEEP_FAIL_CNT);
+        if (fail_count < 5) strcpy(fail_names[fail_count++], "MPU_I2C");
+        delay_ms(SELFTEST_ITEM_RESULT_MS);
+    } else {
+        sprintf(buf, "MPU6050: OK 0x%02X", (unsigned int)whoami);
+        OLED_ShowString(0, 2, buf);
+        Beeper_PlayPattern(BEEP_PASS_ON, 0, 1);
+        delay_ms(SELFTEST_ITEM_RESULT_MS);
+    }
+
+    // ---------- 第2项：加速度计模长 ----------
+    if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+
+    OLED_ShowString(0, 3, "Accel  : ...    ");
+    sum_ax = sum_ay = sum_az = 0;
+    sum_gx = sum_gy = sum_gz = 0;
+    for (uint16_t i = 0; i < SELFTEST_SAMPLES; i++) {
+        MPU6050_ReadAll(&ax, &ay, &az, &gx, &gy, &gz);
+        sum_ax += ax; sum_ay += ay; sum_az += az;
+        sum_gx += gx; sum_gy += gy; sum_gz += gz;
+        delay_ms(2);
+        if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+    }
+    float avg_ax = (float)sum_ax / SELFTEST_SAMPLES / 16384.0f;
+    float avg_ay = (float)sum_ay / SELFTEST_SAMPLES / 16384.0f;
+    float avg_az = (float)sum_az / SELFTEST_SAMPLES / 16384.0f;
+    float accel_norm = sqrtf(avg_ax*avg_ax + avg_ay*avg_ay + avg_az*avg_az);
+
+    if (accel_norm < SELFTEST_ACCEL_MIN_G || accel_norm > SELFTEST_ACCEL_MAX_G) {
+        sprintf(buf, "Accel  : FAIL %.2fg", accel_norm);
+        OLED_ShowString(0, 3, buf);
+        Beeper_PlayPattern(BEEP_FAIL_ON, BEEP_FAIL_OFF, BEEP_FAIL_CNT);
+        if (fail_count < 5) strcpy(fail_names[fail_count++], "ACC_NORM");
+        delay_ms(SELFTEST_ITEM_RESULT_MS);
+    } else {
+        sprintf(buf, "Accel  : OK %.2fg  ", accel_norm);
+        OLED_ShowString(0, 3, buf);
+        Beeper_PlayPattern(BEEP_PASS_ON, 0, 1);
+        delay_ms(SELFTEST_ITEM_RESULT_MS);
+    }
+
+    // ---------- 第3项：陀螺仪零偏 ----------
+    if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+
+    OLED_ShowString(0, 4, "Gyro   : ...    ");
+    float avg_gx = (float)sum_gx / SELFTEST_SAMPLES / 131.0f;
+    float avg_gy = (float)sum_gy / SELFTEST_SAMPLES / 131.0f;
+    float avg_gz = (float)sum_gz / SELFTEST_SAMPLES / 131.0f;
+    float gyro_norm = sqrtf(avg_gx*avg_gx + avg_gy*avg_gy + avg_gz*avg_gz);
+
+    if (gyro_norm > SELFTEST_GYRO_BIAS_LIMIT) {
+        // 超限，执行一次 MPU 校准
+        OLED_ShowString(0, 4, "Gyro   : CAL... ");
+        MPU6050_Calibrate();
+        if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+
+        // 重新采样
+        sum_gx = sum_gy = sum_gz = 0;
+        for (uint16_t i = 0; i < SELFTEST_SAMPLES; i++) {
+            MPU6050_ReadAll(&ax, &ay, &az, &gx, &gy, &gz);
+            sum_gx += gx; sum_gy += gy; sum_gz += gz;
+            delay_ms(2);
+            if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+        }
+        avg_gx = (float)sum_gx / SELFTEST_SAMPLES / 131.0f;
+        avg_gy = (float)sum_gy / SELFTEST_SAMPLES / 131.0f;
+        avg_gz = (float)sum_gz / SELFTEST_SAMPLES / 131.0f;
+        gyro_norm = sqrtf(avg_gx*avg_gx + avg_gy*avg_gy + avg_gz*avg_gz);
+    }
+
+    if (gyro_norm > SELFTEST_GYRO_BIAS_LIMIT) {
+        OLED_ShowString(0, 4, "Gyro   : FAIL   ");
+        Beeper_PlayPattern(BEEP_FAIL_ON, BEEP_FAIL_OFF, BEEP_FAIL_CNT);
+        if (fail_count < 5) strcpy(fail_names[fail_count++], "GYRO_BIAS");
+        delay_ms(SELFTEST_ITEM_RESULT_MS);
+    } else {
+        OLED_ShowString(0, 4, "Gyro   : OK     ");
+        Beeper_PlayPattern(BEEP_PASS_ON, 0, 1);
+        delay_ms(SELFTEST_ITEM_RESULT_MS);
+    }
+
+    // ---------- 第4项：按钮卡死检测 ----------
+    if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+
+    OLED_ShowString(0, 5, "Button : ...    ");
+    uint8_t btn1_stuck = (GPIO_ReadInputDataBit(BUTTON1_GPIO_PORT, BUTTON1_GPIO_PIN) == 0);
+    uint8_t btn2_stuck = (GPIO_ReadInputDataBit(BUTTON2_GPIO_PORT, BUTTON2_GPIO_PIN) == 0);
+    uint8_t btn3_stuck = (GPIO_ReadInputDataBit(BUTTON_GPIO_PORT,  BUTTON_GPIO_PIN)  == 0);
+
+    if (btn1_stuck || btn2_stuck || btn3_stuck) {
+        sprintf(buf, "Button : STUCK %d%d%d", (int)btn1_stuck, (int)btn2_stuck, (int)btn3_stuck);
+        OLED_ShowString(0, 5, buf);
+        Beeper_PlayPattern(BEEP_FAIL_ON, BEEP_FAIL_OFF, BEEP_FAIL_CNT);
+        if (fail_count < 5) strcpy(fail_names[fail_count++], "BTN_STUCK");
+        delay_ms(SELFTEST_ITEM_RESULT_MS);
+    } else {
+        OLED_ShowString(0, 5, "Button : OK     ");
+        Beeper_PlayPattern(BEEP_PASS_ON, 0, 1);
+        delay_ms(SELFTEST_ITEM_RESULT_MS);
+    }
+
+    // ---------- 第5项：舵机3小幅抖动 ----------
+    if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+
+    OLED_ShowString(0, 6, "Servo3 : ...    ");
+    for (uint8_t i = 0; i < 3; i++) {
+        Servo3_SetAngle(SERVO3_ANGLE_OPEN + 5.0f);
+        delay_ms(80);
+        if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+        Servo3_SetAngle(SERVO3_ANGLE_OPEN - 5.0f);
+        delay_ms(80);
+        if (SelfTest_CheckCancel()) { SelfTest_Cancel(); return; }
+    }
+    Servo3_SetAngle(SERVO3_ANGLE_OPEN);   // 回到开仓位置
+    servo3_state = 1;
+    OLED_ShowString(0, 6, "Servo3 : OK     ");
+    Beeper_PlayPattern(BEEP_PASS_ON, 0, 1);
+    delay_ms(SELFTEST_ITEM_RESULT_MS);
+
+    // ---------- 汇总 ----------
+    if (fail_count == 0) {
+        OLED_ShowString(0, 7, "ALL PASS");
+        Beeper_PlayPattern(BEEP_END_OK_ON, BEEP_END_OK_OFF, BEEP_END_OK_CNT);
+
+        // 自检通过后清零飞行状态，回关仓待发射
+        FlightState_Reset();
+        Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
+        servo3_state = 0;
+
+        delay_ms(SELFTEST_END_PASS_MS);
+    } else {
+        sprintf(buf, "FAIL: %s", fail_names[0]);
+        OLED_ShowString(0, 7, buf);
+        Beeper_PlayPattern(BEEP_END_NG_ON, BEEP_END_NG_OFF, BEEP_END_NG_CNT);
+        delay_ms(SELFTEST_END_FAIL_MS);
+    }
+
+    // 恢复蜂鸣器状态机
+    beep_mode_cur = 0xFF;
+    beep_phase = 0;
+    beep_phase_start = sysTick_ms;
+
+    OLED_Clear();
+}
+
 // ==================== 系统初始化 ====================
 void System_Init(void) {
     RCC_DeInit();
@@ -1054,6 +1482,7 @@ int main(void) {
     Button_Init();
     Servo3_Init();
     Button2_Init();
+    Button1_Init();       /* === SelfTest 新增 === */
     Beeper_Init();
 
     OLED_ShowString(0, 4, DISPLAY_CALIB_MSG);
@@ -1075,6 +1504,10 @@ int main(void) {
     uint32_t last_display = sysTick_ms;
 
     while (1) {
+        /* === SelfTest 新增：按钮1按住蜂鸣、松手触发自检 === */
+        uint8_t b1_busy = Button1_Process();
+        /* ================================================= */
+
         if (sysTick_ms - last_update >= 10) {
             last_update = sysTick_ms;
             Attitude_Update();
@@ -1153,8 +1586,10 @@ int main(void) {
 #endif
             }
 
-            // 蜂鸣器统一状态机
-            Beeper_Update();
+            // 蜂鸣器统一状态机（按钮1按住时跳过，避免冲突）
+            if (!b1_busy) {
+                Beeper_Update();
+            }
         }
 
         // OLED 刷新 200ms
@@ -1176,7 +1611,7 @@ int main(void) {
             OLED_ShowString(0, 7, flight_info);
         }
 
-        // 校准按钮
+        // 校准按钮（按钮3）
         if (Button_IsPressed()) {
             OLED_Clear();
             OLED_ShowString(0, 0, DISPLAY_ROCKET_NAME);
