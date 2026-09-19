@@ -1,0 +1,23 @@
+# Keil MDK-ARM
+*.o
+*.axf
+*.elf
+*.hex
+*.bin
+*.map
+*.crf
+*.d
+*.dep
+*.lst
+*.lnp
+*.htm
+*.uvgui*
+Objects/
+Listings/
+build/
+# 其他通用
+*.bak
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
