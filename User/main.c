@@ -1241,10 +1241,10 @@ void SelfTest_Cancel(void) {
     // 取消提示音
     Beeper_PlayPattern(BEEP_CANCEL_ON, 0, BEEP_CANCEL_CNT);
 
-    // 舵机3回到开仓位置
-    Servo3_SetAngle(SERVO3_ANGLE_OPEN);
-    servo3_state = 1;
-
+    // 舵机3复位到关仓位置
+    Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
+    servo3_state = 0;
+	
     // 恢复姿态显示
     roll_angle = 0.0f;
     pitch_angle = 0.0f;
@@ -1444,6 +1444,10 @@ void SelfTest_Run(void) {
         OLED_ShowString(0, 7, buf);
         Beeper_PlayPattern(BEEP_END_NG_ON, BEEP_END_NG_OFF, BEEP_END_NG_CNT);
         delay_ms(SELFTEST_END_FAIL_MS);
+		
+		// 自检失败也复位舵机3
+        Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
+        servo3_state = 0;
     }
 
     // 恢复蜂鸣器状态机
@@ -1595,6 +1599,7 @@ int main(void) {
         // OLED 刷新 200ms
         if (sysTick_ms - last_display >= 200) {
             last_display = sysTick_ms;
+			OLED_ShowString(0, 0, DISPLAY_ROCKET_NAME);   // 防止被自检清屏后不恢复
             OLED_ShowString(0, 6, "R:");
             OLED_ShowFloat(12, 6, roll_angle, 1);
             OLED_ShowString(70, 6, "P:");
