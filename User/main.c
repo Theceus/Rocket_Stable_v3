@@ -11,6 +11,7 @@
  *          最高点检测更灵敏，增加零速修正防止积分漂移
  *          新增：按钮1(PB0)按住哔哔响，听到2声后松手触发系统自检
  *          自检中短按按钮1需二次确认才退出
+ *          新增：未开仓时显示按按钮动画，自检通过时显示竖大拇指动画
  */
 
 #include "stm32f10x.h"
@@ -237,6 +238,10 @@ void OLED_Clear(void);
 void OLED_SetPos(uint8_t x, uint8_t y);
 void OLED_ShowString(uint8_t x, uint8_t y, const char *str);
 void OLED_ShowFloat(uint8_t x, uint8_t y, float num, uint8_t decimal);
+/* === 位图绘制与矩形清除（自检动画用） === */
+void OLED_DrawBitmap(uint8_t x, uint8_t y_page, const uint8_t *bmp, uint8_t w, uint8_t pages);
+void OLED_ClearRect(uint8_t x, uint8_t y_page, uint8_t w, uint8_t pages);
+/* ========================================= */
 
 void MPU6050_Init(void);
 void MPU6050_ReadAll(int16_t *ax, int16_t *ay, int16_t *az,
@@ -663,6 +668,26 @@ void OLED_ShowFloat(uint8_t x, uint8_t y, float num, uint8_t decimal) {
     sprintf(buf, "%.*f", decimal, num);
     OLED_ShowString(x, y, buf);
 }
+
+/* === 位图绘制与矩形清除（自检动画用） === */
+void OLED_DrawBitmap(uint8_t x, uint8_t y_page, const uint8_t *bmp, uint8_t w, uint8_t pages) {
+    for (uint8_t p = 0; p < pages; p++) {
+        OLED_SetPos(x, y_page + p);
+        for (uint8_t c = 0; c < w; c++) {
+            OLED_WriteData(bmp[p * w + c]);
+        }
+    }
+}
+
+void OLED_ClearRect(uint8_t x, uint8_t y_page, uint8_t w, uint8_t pages) {
+    for (uint8_t p = 0; p < pages; p++) {
+        OLED_SetPos(x, y_page + p);
+        for (uint8_t c = 0; c < w; c++) {
+            OLED_WriteData(0x00);
+        }
+    }
+}
+/* ========================================= */
 
 // ==================== MPU6050 驱动 ====================
 void MPU6050_Init(void) {
@@ -1189,6 +1214,63 @@ uint8_t Button1_Process(void) {
 
 /* === SelfTest 新增：自检相关函数 === */
 
+/* === 自检动画图标（16x16，2 页 x 16 列） === */
+
+// 按按钮图标
+// 视觉示意：
+//       ...####...
+//       ...####...
+//       ...####...
+//     ..########..
+//      ..######...
+//       ...##....       ← 箭头尖端
+//       ........       ← 间隙
+//       ........       ← 间隙
+//      ..######..
+//     ..########..
+//     ..########..
+//     ..########..
+//      ..######..       ← 按钮（14 像素宽圆角矩形）
+//       ........
+//       ........
+//       ........
+static const uint8_t ICON_PRESS_BUTTON[32] = {
+    // 页0（行0-7）：箭头
+    0x00, 0x00, 0x00, 0x08, 0x18, 0x1F, 0x3F, 0x3F,
+    0x3F, 0x3F, 0x18, 0x18, 0x08, 0x00, 0x00, 0x00,
+    // 页1（行8-15）：按钮
+    0x00, 0x0E, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F,
+    0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x0E, 0x00,
+};
+
+// 竖大拇指图标
+// 视觉示意：
+//         ..###..
+//        .#####..
+//        .#####..
+//        .#####..
+//        .#####..
+//        .#####..
+//        .#####..
+//      ..#######..        ← 拇指 + 手掌顶部
+//      ###########.
+//   ### ###########.     ← 袖子 + 缝隙 + 拳头
+//   ### ###########.
+//   ### ###########.
+//   ### ###########.
+//   ### ###########.
+//   ### ###########.
+//    ## ##########.      ← 底部收窄
+// （列0-2=袖子，列3=缝隙，列4-15=拳头）
+static const uint8_t ICON_THUMB_UP[32] = {
+    // 第 0 页（第 0-7 行）: 拇指 + 手掌上部
+    0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0xFE, 0xFE,
+    0xFF, 0xFF, 0xFF, 0xFF, 0x80, 0x80, 0x00, 0x00,
+    // 第 1 页（第 8-15 行）: 手掌下部 + 左侧衣袖 + 缝隙
+    0xFE, 0xFF, 0xFF, 0x03, 0x7F, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+};
+
 /*
  * 自检中检测取消：
  *   第一次短按按钮1 → 显示 "Press B1 confirm"，等 3 秒。
@@ -1244,7 +1326,7 @@ void SelfTest_Cancel(void) {
     // 舵机3复位到关仓位置
     Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
     servo3_state = 0;
-	
+
     // 恢复姿态显示
     roll_angle = 0.0f;
     pitch_angle = 0.0f;
@@ -1266,9 +1348,21 @@ void SelfTest_Run(void) {
         OLED_ShowString(0, 0, "Self Test");
         OLED_ShowString(0, 2, "Door is closed");
         OLED_ShowString(0, 3, "*Press Button2 to");
-        OLED_ShowString(0, 4, " open it first");
-        Beeper_PlayPattern(BEEP_NEED_OPEN_ON, BEEP_NEED_OPEN_OFF, BEEP_NEED_OPEN_CNT);
-        delay_ms(SELFTEST_DOOR_CLOSED_MS);
+        OLED_ShowString(0, 4, " open it");
+
+        // 按按钮图标闪烁 + 蜂鸣器配合，共约 3 秒
+        // 图标居中在 x=56，放在 y=5~6（第 40-55 行）
+        for (uint8_t i = 0; i < 3; i++) {
+            OLED_DrawBitmap(56, 5, ICON_PRESS_BUTTON, 16, 2);
+            Beeper_PlayPattern(BEEP_NEED_OPEN_ON, 0, 1);   // 单声长响
+            delay_ms(300);
+            OLED_ClearRect(56, 5, 16, 2);
+            delay_ms(300);
+        }
+
+        // 最后让图标停留一会儿，方便用户看清
+        OLED_DrawBitmap(56, 5, ICON_PRESS_BUTTON, 16, 2);
+        delay_ms(600);
 
         beep_mode_cur = 0xFF;
         beep_phase = 0;
@@ -1433,19 +1527,36 @@ void SelfTest_Run(void) {
         OLED_ShowString(0, 7, "ALL PASS");
         Beeper_PlayPattern(BEEP_END_OK_ON, BEEP_END_OK_OFF, BEEP_END_OK_CNT);
 
+        delay_ms(400);
+
+        // 清屏，展示"通过"画面
+        OLED_Clear();
+        OLED_ShowString(22, 5, "Self Test Pass");    // 14 字符居中
+        OLED_ShowString(25, 6, "Ready to fly!");     // 13 字符居中
+
+        // 大拇指闪烁 3 次
+        // 图标居中在 x=56，放在 y=2~3（第 16-31 行）
+        for (uint8_t i = 0; i < 3; i++) {
+            OLED_DrawBitmap(56, 2, ICON_THUMB_UP, 16, 2);
+            delay_ms(350);
+            OLED_ClearRect(56, 2, 16, 2);
+            delay_ms(200);
+        }
+        // 最后保持大拇指可见
+        OLED_DrawBitmap(56, 2, ICON_THUMB_UP, 16, 2);
+        delay_ms(1200);
+
         // 自检通过后清零飞行状态，回关仓待发射
         FlightState_Reset();
         Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
         servo3_state = 0;
-
-        delay_ms(SELFTEST_END_PASS_MS);
     } else {
         sprintf(buf, "FAIL: %s", fail_names[0]);
         OLED_ShowString(0, 7, buf);
         Beeper_PlayPattern(BEEP_END_NG_ON, BEEP_END_NG_OFF, BEEP_END_NG_CNT);
         delay_ms(SELFTEST_END_FAIL_MS);
-		
-		// 自检失败也复位舵机3
+
+        // 自检失败也复位舵机3
         Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
         servo3_state = 0;
     }
@@ -1599,7 +1710,7 @@ int main(void) {
         // OLED 刷新 200ms
         if (sysTick_ms - last_display >= 200) {
             last_display = sysTick_ms;
-			OLED_ShowString(0, 0, DISPLAY_ROCKET_NAME);   // 防止被自检清屏后不恢复
+            OLED_ShowString(0, 0, DISPLAY_ROCKET_NAME);   // 防止被自检清屏后不恢复
             OLED_ShowString(0, 6, "R:");
             OLED_ShowFloat(12, 6, roll_angle, 1);
             OLED_ShowString(70, 6, "P:");
