@@ -1055,7 +1055,16 @@ void Beeper_Update(void) {
     uint32_t elapsed = sysTick_ms - beep_phase_start;
 
     if (target_mode == BEEP_MODE_ON) {
-        Beeper_On();
+        // 开仓：三连慢速鸣叫——响300、停300、响300、停300、响300、停900（周期2400ms）
+        switch (beep_phase) {
+            case 0: Beeper_On();  if (elapsed >= 300) { beep_phase = 1; beep_phase_start = sysTick_ms; } break;
+            case 1: Beeper_Off(); if (elapsed >= 300) { beep_phase = 2; beep_phase_start = sysTick_ms; } break;
+            case 2: Beeper_On();  if (elapsed >= 300) { beep_phase = 3; beep_phase_start = sysTick_ms; } break;
+            case 3: Beeper_Off(); if (elapsed >= 300) { beep_phase = 4; beep_phase_start = sysTick_ms; } break;
+            case 4: Beeper_On();  if (elapsed >= 300) { beep_phase = 5; beep_phase_start = sysTick_ms; } break;
+            case 5: Beeper_Off(); if (elapsed >= 900) { beep_phase = 0; beep_phase_start = sysTick_ms; } break;
+            default: beep_phase = 0; beep_phase_start = sysTick_ms; break;
+        }
         return;
     }
 
