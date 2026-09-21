@@ -65,12 +65,12 @@
 
 // ---------- 倾斜保险 ----------
 #define TILT_DETECT_CONSECUTIVE 3   // 连续超阈值次数（防抖）
-float tilt_angle_limit = 60.0f;     // 倾斜角阈值（度）
+float tilt_angle_limit = 45.0f;     // 倾斜角阈值（度）
 #define TILT_GYRO_THRESHOLD  300.0f // 角速度阈值(°/s)，超过此值视为振动，保险不触发
 
 // ---------- 飞行控制 ----------
 float safety_delay_sec = 3.0f;      // 发射后强制开仓延时（秒）
-float startAcc = 5.0f;              // 起飞加速度阈值（m/s²）
+float startAcc = 10.0f;             // 起飞加速度阈值（m/s²）
 
 // ---------- 舵机物理限制 & 方向 ----------
 float servo_angle_limit = 30.0f;    // 姿态舵机最大偏转角度（度）
@@ -1059,14 +1059,14 @@ void Beeper_Update(void) {
     uint32_t elapsed = sysTick_ms - beep_phase_start;
 
     if (target_mode == BEEP_MODE_ON) {
-        // 开仓：三连慢速鸣叫——响300、停300、响300、停300、响300、停900（周期2400ms）
+        // 开仓：三连慢速鸣叫——响500、停300、响500、停300、响500、停1000
         switch (beep_phase) {
-            case 0: Beeper_On();  if (elapsed >= 300) { beep_phase = 1; beep_phase_start = sysTick_ms; } break;
+            case 0: Beeper_On();  if (elapsed >= 500) { beep_phase = 1; beep_phase_start = sysTick_ms; } break;
             case 1: Beeper_Off(); if (elapsed >= 300) { beep_phase = 2; beep_phase_start = sysTick_ms; } break;
-            case 2: Beeper_On();  if (elapsed >= 300) { beep_phase = 3; beep_phase_start = sysTick_ms; } break;
+            case 2: Beeper_On();  if (elapsed >= 500) { beep_phase = 3; beep_phase_start = sysTick_ms; } break;
             case 3: Beeper_Off(); if (elapsed >= 300) { beep_phase = 4; beep_phase_start = sysTick_ms; } break;
-            case 4: Beeper_On();  if (elapsed >= 300) { beep_phase = 5; beep_phase_start = sysTick_ms; } break;
-            case 5: Beeper_Off(); if (elapsed >= 900) { beep_phase = 0; beep_phase_start = sysTick_ms; } break;
+            case 4: Beeper_On();  if (elapsed >= 500) { beep_phase = 5; beep_phase_start = sysTick_ms; } break;
+            case 5: Beeper_Off(); if (elapsed >= 1000) { beep_phase = 0; beep_phase_start = sysTick_ms; } break;
             default: beep_phase = 0; beep_phase_start = sysTick_ms; break;
         }
         return;
@@ -1371,8 +1371,8 @@ void SelfTest_Run(void) {
     // ---------- 前置条件：必须已开仓 ----------
     if (servo3_state != 1) {
         OLED_Clear();
-        OLED_ShowString(0, 0, "Self Test");
-        OLED_ShowString(0, 2, "Door is closed");
+        OLED_ShowString(0, 0, "> Self-Test");
+        OLED_ShowString(0, 2, "!Door is closed!");
         OLED_ShowString(0, 3, "*Press Button2 to");
         OLED_ShowString(0, 4, " open it");
 
@@ -1401,8 +1401,8 @@ void SelfTest_Run(void) {
     Beeper_PlayPattern(BEEP_START_ON, BEEP_START_OFF, BEEP_START_CNT);
 
     OLED_Clear();
-    OLED_ShowString(0, 0, "Self Test");
-    OLED_ShowString(0, 1, "Hold still...");
+    OLED_ShowString(0, 0, "> Self-Test");
+    OLED_ShowString(0, 1, "*Hold still...");
 
     // 给用户 1.5 秒停手
     for (uint16_t i = 0; i < SELFTEST_HOLD_STILL_MS / 50; i++) {
@@ -1557,7 +1557,7 @@ void SelfTest_Run(void) {
 
         // 清屏，展示"通过"画面
         OLED_Clear();
-        OLED_ShowString(22, 5, "Self Test Pass");    // 14 字符居中
+        OLED_ShowString(22, 5, "Self-Test Pass");    // 14 字符居中
         OLED_ShowString(25, 6, "Ready to fly!");     // 13 字符居中
 
         // 大拇指闪烁 3 次
@@ -1577,10 +1577,28 @@ void SelfTest_Run(void) {
         Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
         servo3_state = 0;
     } else {
+        // 先显示失败代码行
         sprintf(buf, "FAIL: %s", fail_names[0]);
         OLED_ShowString(0, 7, buf);
         Beeper_PlayPattern(BEEP_END_NG_ON, BEEP_END_NG_OFF, BEEP_END_NG_CNT);
-        delay_ms(SELFTEST_END_FAIL_MS);
+        delay_ms(400);
+
+        // 清屏，展示"失败"画面
+        OLED_Clear();
+        OLED_ShowString(22, 5, "Self-Test Fail");    // 14 字符居中
+        OLED_ShowString(25, 6, "Check & Retry");     // 13 字符居中
+
+        // QAQ 闪烁 3 次
+        // QAQ 宽 3 字符 = 18 像素，居中在 x=50，放在 y=2 行
+        for (uint8_t i = 0; i < 3; i++) {
+            OLED_ShowString(50, 2, "Q ^ Q");
+            delay_ms(350);
+            OLED_ShowString(50, 2, "     ");
+            delay_ms(200);
+        }
+        // 最后保持 QAQ 可见
+        OLED_ShowString(50, 2, "Q ^ Q");
+        delay_ms(1200);
 
         // 自检失败也复位舵机3
         Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
