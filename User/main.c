@@ -12,6 +12,7 @@
  *          新增：按钮1(PB0)按住哔哔响，听到2声后松手触发系统自检
  *          自检中短按按钮1需二次确认才退出
  *          新增：未开仓时显示按按钮动画，自检通过时显示竖大拇指动画
+ *          优化：按钮等待循环加 2 秒超时，防止按钮卡死导致主循环阻塞
  */
 
 #include "stm32f10x.h"
@@ -138,6 +139,9 @@ int8_t gyro_sign_z  = 1;
 // 自检确认退出参数
 #define SELFTEST_CONFIRM_WINDOW_MS  3000    // 二次确认等待时间
 #define SELFTEST_SUPPRESS_MS        1000    // 按钮按住超过1秒视为误触
+
+// 按钮等待释放的超时保护（防止按钮卡死阻塞主循环）
+#define BUTTON_RELEASE_TIMEOUT_MS   2000    // 按钮等待释放最长 2 秒
 
 // 蜂鸣器自检专用提示音（不与原有三档重复）
 #define BEEP_START_ON        50
@@ -1119,6 +1123,7 @@ void Button2_Init(void) {
     GPIO_Init(BUTTON2_GPIO_PORT, &GPIO_InitStructure);
 }
 
+/* 按钮2：加入 2 秒超时保护，防止按钮卡死阻塞主循环 */
 uint8_t Button2_IsPressed(void) {
     static uint32_t last_stable_ms = 0;
     static uint8_t last_state = 1;
@@ -1128,7 +1133,10 @@ uint8_t Button2_IsPressed(void) {
         last_state = current_state;
     }
     if (current_state == 0 && (sysTick_ms - last_stable_ms >= 20)) {
-        while (GPIO_ReadInputDataBit(BUTTON2_GPIO_PORT, BUTTON2_GPIO_PIN) == 0);
+        uint32_t wait_start = sysTick_ms;
+        while (GPIO_ReadInputDataBit(BUTTON2_GPIO_PORT, BUTTON2_GPIO_PIN) == 0) {
+            if (sysTick_ms - wait_start > BUTTON_RELEASE_TIMEOUT_MS) return 0;   // 超时视为卡死，不触发
+        }
         return 1;
     }
     return 0;
@@ -1143,6 +1151,7 @@ void Button_Init(void) {
     GPIO_Init(BUTTON_GPIO_PORT, &GPIO_InitStructure);
 }
 
+/* 按钮3：加入 2 秒超时保护，防止按钮卡死阻塞主循环 */
 uint8_t Button_IsPressed(void) {
     static uint32_t last_stable_ms = 0;
     static uint8_t last_state = 1;
@@ -1152,7 +1161,10 @@ uint8_t Button_IsPressed(void) {
         last_state = current_state;
     }
     if (current_state == 0 && (sysTick_ms - last_stable_ms >= 20)) {
-        while (GPIO_ReadInputDataBit(BUTTON_GPIO_PORT, BUTTON_GPIO_PIN) == 0);
+        uint32_t wait_start = sysTick_ms;
+        while (GPIO_ReadInputDataBit(BUTTON_GPIO_PORT, BUTTON_GPIO_PIN) == 0) {
+            if (sysTick_ms - wait_start > BUTTON_RELEASE_TIMEOUT_MS) return 0;   // 超时视为卡死，不触发
+        }
         return 1;
     }
     return 0;
@@ -1286,6 +1298,7 @@ static const uint8_t ICON_THUMB_UP[32] = {
  *   3 秒内再按一次 → 返回 1，调用方执行取消。
  *   3 秒内没按 → 清提示，返回 0，自检继续。
  *   按钮按住超过 1 秒 → 视为误触，忽略，且本次按住不再触发确认。
+ *   等待释放循环加入 2 秒超时，防止按钮卡死阻塞自检流程。
  */
 uint8_t SelfTest_CheckCancel(void) {
     static uint8_t suppress_until_release = 0;
@@ -1316,7 +1329,11 @@ uint8_t SelfTest_CheckCancel(void) {
     start = sysTick_ms;
     while ((sysTick_ms - start) < SELFTEST_CONFIRM_WINDOW_MS) {
         if (Button1_IsDown()) {
-            while (Button1_IsDown()) delay_ms(10);
+            uint32_t release_wait = sysTick_ms;
+            while (Button1_IsDown()) {
+                delay_ms(10);
+                if (sysTick_ms - release_wait > BUTTON_RELEASE_TIMEOUT_MS) break;   // 超时强制脱离
+            }
             OLED_ShowString(0, 1, "                ");
             return 1;
         }
