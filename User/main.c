@@ -69,7 +69,7 @@ float tilt_angle_limit = 45.0f;     // 倾斜角阈值（度）
 #define TILT_GYRO_THRESHOLD  300.0f // 角速度阈值(°/s)，超过此值视为振动，保险不触发
 
 // ---------- 飞行控制 ----------
-float safety_delay_sec = 3.0f;      // 发射后强制开仓延时（秒）
+float safety_delay_sec = 5.0f;      // 发射后强制开仓延时（时间保险/秒）
 float startAcc = 10.0f;             // 起飞加速度阈值（m/s²）
 
 // ---------- 舵机物理限制 & 方向 ----------
