@@ -13,6 +13,7 @@
  *          自检中短按按钮1需二次确认才退出
  *          新增：未开仓时显示按按钮动画，自检通过时显示竖大拇指动画
  *          优化：按钮等待循环加 2 秒超时，防止按钮卡死导致主循环阻塞
+ *          新增：校准时 "=> Calibrating..." 后显示 |/-\ 旋转动画
  */
 
 #include "stm32f10x.h"
@@ -170,10 +171,10 @@ int8_t gyro_sign_z  = 1;
 /* ============================================ */
 
 // ---------- OLED 显示文字 ----------
-const char* DISPLAY_ROCKET_NAME = " AHU.UniversityRocket";
+const char* DISPLAY_ROCKET_NAME = "*AHU.UniversityRocket";
 const char* DISPLAY_DEVELOPER   = "Dev by TheceusSun";
 const char* DISPLAY_CALIB_MSG   = "=> Calibrating...";
-const char* DISPLAY_CALIB_DONE  = "=> Calib Done!   ";
+const char* DISPLAY_CALIB_DONE  = "=> Calibrate Done!";
 
 // ==================== 硬件引脚（开仓舵机及按钮2） ====================
 #define SERVO3_GPIO_PORT        GPIOA
@@ -205,6 +206,10 @@ float max_up_accel = 0.0f;
 float max_height = 0.0f;
 uint8_t launched = 0;
 uint8_t apogee_reached = 0;
+
+/* === 校准旋转动画开关 === */
+uint8_t calib_anim_on = 0;      // 1: MPU6050_Calibrate() 内刷新 |/-\ 动画
+/* ========================= */
 
 // 神经PID状态（仅模式2）
 #if CONTROL_MODE == 2
@@ -723,12 +728,33 @@ void MPU6050_Calibrate(void) {
     int32_t sum_ax = 0, sum_ay = 0, sum_az = 0;
     int32_t sum_gx = 0, sum_gy = 0, sum_gz = 0;
     uint16_t i;
+
+    /* === 旋转动画：| / - \ === */
+    static const char spinner[4] = {'|', '/', '-', '\\'};
+    char spin_str[2] = {0, 0};
+    uint8_t spin_idx = 0;
+    /* ======================== */
+
     for (i = 0; i < calib_samples; i++) {
         MPU6050_ReadAll(&ax, &ay, &az, &gx, &gy, &gz);
         sum_ax += ax * accel_sign_x; sum_ay += ay * accel_sign_y; sum_az += az * accel_sign_z;
         sum_gx += gx * gyro_sign_x; sum_gy += gy * gyro_sign_y; sum_gz += gz * gyro_sign_z;
+
+        /* 每 50 次采样（约 100ms）刷新一次动画，紧跟在 "=> Calibrating..." 后面 */
+        if (calib_anim_on && (i % 50 == 0)) {
+            spin_str[0] = spinner[spin_idx];
+            OLED_ShowString(108, 4, spin_str);
+            spin_idx = (spin_idx + 1) & 0x03;
+        }
+
         delay_ms(2);
     }
+
+    /* 清除旋转动画残留 */
+    if (calib_anim_on) {
+        OLED_ShowString(108, 4, " ");
+    }
+
     accel_offset_angle_roll = atan2((float)sum_ay / calib_samples, (float)sum_az / calib_samples) * 57.2958f;
     accel_offset_angle_pitch = atan2(-(float)sum_ax / calib_samples,
                                      sqrt(((float)sum_ay / calib_samples) * ((float)sum_ay / calib_samples) +
@@ -1645,7 +1671,9 @@ int main(void) {
     Beeper_Init();
 
     OLED_ShowString(0, 4, DISPLAY_CALIB_MSG);
+    calib_anim_on = 1;              /* 打开校准旋转动画 */
     MPU6050_Calibrate();
+    calib_anim_on = 0;
 
     roll_angle = 0.0f; pitch_angle = 0.0f;
     gyro_rate_x_deg = 0.0f; gyro_rate_y_deg = 0.0f;
@@ -1755,15 +1783,21 @@ int main(void) {
         if (sysTick_ms - last_display >= 200) {
             last_display = sysTick_ms;
             OLED_ShowString(0, 0, DISPLAY_ROCKET_NAME);   // 防止被自检清屏后不恢复
-            OLED_ShowString(0, 6, "R:");
-            OLED_ShowFloat(12, 6, roll_angle, 1);
-            OLED_ShowString(70, 6, "P:");
-            OLED_ShowFloat(82, 6, pitch_angle, 1);
+			OLED_ShowString(0, 6, "--");
+            OLED_ShowString(16, 6, "R:");
+            OLED_ShowFloat(28, 6, roll_angle, 1);
+            OLED_ShowString(72, 6, "P:");
+            OLED_ShowFloat(84, 6, pitch_angle, 1);
+			OLED_ShowString(114, 6, "--");
 
             char door_str[16];
-            sprintf(door_str, "Door: %d", servo3_state);
-            OLED_ShowString(0, 2, door_str);
+			sprintf(door_str, "Door:%d", servo3_state);
+			OLED_ShowString(2, 2, door_str);
 
+			char launch_str[16];
+			sprintf(launch_str, "Launch:%d", launched);
+			OLED_ShowString(78, 2, launch_str);
+			
             char flight_info[32];
             float display_accel = (max_up_accel > 100.0f || max_up_accel < 0.0f) ? 0.0f : max_up_accel;
             float display_height = (max_height > 5000.0f || max_height < 0.0f) ? 0.0f : max_height;
@@ -1778,7 +1812,10 @@ int main(void) {
             OLED_ShowString(0, 4, DISPLAY_CALIB_MSG);
 
             Servo_Reset();
+            calib_anim_on = 1;              /* 打开校准旋转动画 */
             MPU6050_Calibrate();
+            calib_anim_on = 0;
+
             roll_angle = 0.0f; pitch_angle = 0.0f;
             gyro_rate_x_deg = 0.0f; gyro_rate_y_deg = 0.0f;
             tilt_triggered = 0;
