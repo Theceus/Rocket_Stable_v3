@@ -65,7 +65,7 @@
 
 // ---------- 倾斜保险 ----------
 #define TILT_DETECT_CONSECUTIVE 3   // 连续超阈值次数（防抖）
-float tilt_angle_limit = 45.0f;     // 倾斜角阈值（度）
+float tilt_angle_limit = 60.0f;     // 倾斜角阈值（度）
 #define TILT_GYRO_THRESHOLD  300.0f // 角速度阈值(°/s)，超过此值视为振动，保险不触发
 
 // ---------- 飞行控制 ----------
