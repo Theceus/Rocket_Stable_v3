@@ -15,6 +15,7 @@
  *          优化：按钮等待循环加 2 秒超时，防止按钮卡死导致主循环阻塞
  *          新增：校准时 "=> Calibrating..." 后显示 |/-\ 旋转动画
  *          优化：垂直加速度做姿态补偿，峰值用原始值，积分用滤波值
+ *          新增：第4行状态行根据上一步操作显示对应内容
  */
 
 #include "stm32f10x.h"
@@ -211,6 +212,10 @@ uint8_t apogee_reached = 0;
 /* === 校准旋转动画开关 === */
 uint8_t calib_anim_on = 0;      // 1: MPU6050_Calibrate() 内刷新 |/-\ 动画
 /* ========================= */
+
+/* === 状态行显示：根据上一步操作在 y=4 显示对应内容 === */
+const char* status_line_msg = "=> Calibrate Done!";
+/* =================================================== */
 
 // 神经PID状态（仅模式2）
 #if CONTROL_MODE == 2
@@ -1374,6 +1379,10 @@ void SelfTest_Cancel(void) {
     beep_phase = 0;
     beep_phase_start = sysTick_ms;
 
+    /* === 更新状态行：显示自检取消 === */
+    status_line_msg = "=> Self-Test Cxl";
+    /* ================================= */
+
     OLED_Clear();
 }
 
@@ -1402,6 +1411,11 @@ void SelfTest_Run(void) {
         beep_mode_cur = 0xFF;
         beep_phase = 0;
         beep_phase_start = sysTick_ms;
+
+        /* === 更新状态行：提示需先开仓 === */
+        status_line_msg = "=> Open Door 1st";
+        /* ================================= */
+
         OLED_Clear();
         return;
     }
@@ -1559,7 +1573,7 @@ void SelfTest_Run(void) {
 
     // ---------- 汇总 ----------
     if (fail_count == 0) {
-        OLED_ShowString(0, 7, "ALL PASS");
+        OLED_ShowString(0, 7, "* ALL PASS!");
         Beeper_PlayPattern(BEEP_END_OK_ON, BEEP_END_OK_OFF, BEEP_END_OK_CNT);
 
         delay_ms(400);
@@ -1584,6 +1598,10 @@ void SelfTest_Run(void) {
         FlightState_Reset();
         Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
         servo3_state = 0;
+
+        /* === 更新状态行：自检通过 === */
+        status_line_msg = "=> Self-Test Pass ^_^";
+        /* ============================ */
     } else {
         // 先显示失败代码行
         sprintf(buf, "FAIL: %s", fail_names[0]);
@@ -1610,6 +1628,10 @@ void SelfTest_Run(void) {
         // 自检失败也复位舵机3
         Servo3_SetAngle(SERVO3_ANGLE_DEFAULT);
         servo3_state = 0;
+
+        /* === 更新状态行：自检失败 === */
+        status_line_msg = "=> Self-Test Fail";
+        /* ============================ */
     }
 
     // 恢复蜂鸣器状态机
@@ -1618,6 +1640,8 @@ void SelfTest_Run(void) {
     beep_phase_start = sysTick_ms;
 
     OLED_Clear();
+    /* 立即重绘状态行，避免 200ms 刷新周期内短暂空白 */
+    OLED_ShowString(0, 4, status_line_msg);
 }
 
 // ==================== 系统初始化 ====================
@@ -1666,7 +1690,10 @@ int main(void) {
     NeuroPID_Reset();
 #endif
 
-    OLED_ShowString(0, 4, DISPLAY_CALIB_DONE);
+    /* === 开机校准完成后，更新状态行 === */
+    status_line_msg = DISPLAY_CALIB_DONE;
+    OLED_ShowString(0, 4, status_line_msg);
+    /* ================================= */
 
     uint32_t last_update = sysTick_ms;
     uint32_t last_display = sysTick_ms;
@@ -1778,7 +1805,11 @@ int main(void) {
 			char launch_str[16];
 			sprintf(launch_str, "Launch:%d", launched);
 			OLED_ShowString(78, 2, launch_str);
-			
+
+            /* === 第4行状态行：根据上一步操作显示对应内容 === */
+            OLED_ShowString(0, 4, status_line_msg);
+            /* =============================================== */
+
             char flight_info[32];
             float display_accel = (max_up_accel > 100.0f || max_up_accel < 0.0f) ? 0.0f : max_up_accel;
             float display_height = (max_height > 5000.0f || max_height < 0.0f) ? 0.0f : max_height;
@@ -1818,7 +1849,10 @@ int main(void) {
             Beeper_Off();
             beep_mode_cur = 0xFF;   // 强制下次 Beeper_Update 重新初始化
 
-            OLED_ShowString(0, 4, DISPLAY_CALIB_DONE);
+            /* === 按钮3校准完成后，更新状态行 === */
+            status_line_msg = DISPLAY_CALIB_DONE;
+            OLED_ShowString(0, 4, status_line_msg);
+            /* ================================== */
         }
 
         // 按钮2 手动开仓
