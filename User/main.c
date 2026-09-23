@@ -14,6 +14,7 @@
  *          新增：未开仓时显示按按钮动画，自检通过时显示竖大拇指动画
  *          优化：按钮等待循环加 2 秒超时，防止按钮卡死导致主循环阻塞
  *          新增：校准时 "=> Calibrating..." 后显示 |/-\ 旋转动画
+ *          优化：垂直加速度做姿态补偿，峰值用原始值，积分用滤波值
  */
 
 #include "stm32f10x.h"
@@ -849,15 +850,32 @@ void Attitude_Update(void) {
     }
 
     // ---------- 垂直加速度与飞行检测 ----------
-    static float az_filtered = 1.0f;
-    az_filtered = 0.8f * az_filtered + 0.2f * az;
-    float accel_up = (az_filtered - 1.0f) * 9.80665f;
+    // 姿态补偿：把机体系加速度 (ax,ay,az) 投影到地理竖直方向
+    // 静止水平时 a_vert_g ≈ 1g；火箭竖直向上加速时 a_vert_g > 1g
+    // 之前仅用 az，火箭一倾斜积分就会明显漂移
+    float roll_rad  = roll_angle  * 0.0174533f;
+    float pitch_rad = pitch_angle * 0.0174533f;
+    float sr = sinf(roll_rad),  cr = cosf(roll_rad);
+    float sp = sinf(pitch_rad), cp = cosf(pitch_rad);
+    float a_vert_g = -ax * sp + ay * sr * cp + az * cr * cp;   // 单位 g
+
+    // 原始竖直加速度（未滤波）——用于捕获推力峰值，避免低通滤波削峰
+    float accel_up_raw = (a_vert_g - 1.0f) * 9.80665f;
+
+    // 滤波后竖直加速度——用于速度/位置积分，抑制噪声
+    static float a_vert_filt = 1.0f;
+    a_vert_filt = 0.85f * a_vert_filt + 0.15f * a_vert_g;
+    float accel_up = (a_vert_filt - 1.0f) * 9.80665f;
 
     #define STATIC_ACCEL_THRESHOLD  0.5f
+    #define STATIC_GYRO_THRESHOLD   10.0f
     static uint8_t static_counter = 0;
 
     if (!launched) {
-        if (fabs(accel_up) < STATIC_ACCEL_THRESHOLD) {
+        // 静止判定：加速度接近 1g 且角速度小才认为是地面静止，防止缓慢漂移误清零
+        if (fabs(accel_up) < STATIC_ACCEL_THRESHOLD &&
+            fabs(gyro_rate_x_deg) < STATIC_GYRO_THRESHOLD &&
+            fabs(gyro_rate_y_deg) < STATIC_GYRO_THRESHOLD) {
             static_counter++;
             if (static_counter >= 10) {
                 vertical_velocity = 0.0f;
@@ -889,7 +907,8 @@ void Attitude_Update(void) {
         }
         vertical_position += vertical_velocity * dt;
 
-        if (accel_up > max_up_accel && accel_up < 100.0f) max_up_accel = accel_up;
+        // 峰值加速度用原始值捕获，滤波值会削掉推力峰值
+        if (accel_up_raw > max_up_accel && accel_up_raw < 100.0f) max_up_accel = accel_up_raw;
         if (vertical_position > max_height && vertical_position < 5000.0f) max_height = vertical_position;
 
         if (fabs(vertical_velocity) > 500.0f || vertical_position > 5000.0f || vertical_position < -500.0f) {
@@ -1264,23 +1283,6 @@ uint8_t Button1_Process(void) {
 /* === 自检动画图标（16x16，2 页 x 16 列） === */
 
 // 按按钮图标
-// 视觉示意：
-//       ...####...
-//       ...####...
-//       ...####...
-//     ..########..
-//      ..######...
-//       ...##....       ← 箭头尖端
-//       ........       ← 间隙
-//       ........       ← 间隙
-//      ..######..
-//     ..########..
-//     ..########..
-//     ..########..
-//      ..######..       ← 按钮（14 像素宽圆角矩形）
-//       ........
-//       ........
-//       ........
 static const uint8_t ICON_PRESS_BUTTON[32] = {
     // 页0（行0-7）：箭头
     0x00, 0x00, 0x00, 0x08, 0x18, 0x1F, 0x3F, 0x3F,
@@ -1291,24 +1293,6 @@ static const uint8_t ICON_PRESS_BUTTON[32] = {
 };
 
 // 竖大拇指图标
-// 视觉示意：
-//         ..###..
-//        .#####..
-//        .#####..
-//        .#####..
-//        .#####..
-//        .#####..
-//        .#####..
-//      ..#######..        ← 拇指 + 手掌顶部
-//      ###########.
-//   ### ###########.     ← 袖子 + 缝隙 + 拳头
-//   ### ###########.
-//   ### ###########.
-//   ### ###########.
-//   ### ###########.
-//   ### ###########.
-//    ## ##########.      ← 底部收窄
-// （列0-2=袖子，列3=缝隙，列4-15=拳头）
 static const uint8_t ICON_THUMB_UP[32] = {
     // 第 0 页（第 0-7 行）: 拇指 + 手掌上部
     0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0xFE, 0xFE,
@@ -1403,7 +1387,6 @@ void SelfTest_Run(void) {
         OLED_ShowString(0, 4, " open it");
 
         // 按按钮图标闪烁 + 蜂鸣器配合，共约 3 秒
-        // 图标居中在 x=56，放在 y=5~6（第 40-55 行）
         for (uint8_t i = 0; i < 3; i++) {
             OLED_DrawBitmap(56, 5, ICON_PRESS_BUTTON, 16, 2);
             Beeper_PlayPattern(BEEP_NEED_OPEN_ON, 0, 1);   // 单声长响
@@ -1587,7 +1570,6 @@ void SelfTest_Run(void) {
         OLED_ShowString(25, 6, "Ready to fly!");     // 13 字符居中
 
         // 大拇指闪烁 3 次
-        // 图标居中在 x=56，放在 y=2~3（第 16-31 行）
         for (uint8_t i = 0; i < 3; i++) {
             OLED_DrawBitmap(56, 2, ICON_THUMB_UP, 16, 2);
             delay_ms(350);
@@ -1615,7 +1597,6 @@ void SelfTest_Run(void) {
         OLED_ShowString(25, 6, "Check & Retry");     // 13 字符居中
 
         // QAQ 闪烁 3 次
-        // QAQ 宽 3 字符 = 18 像素，居中在 x=50，放在 y=2 行
         for (uint8_t i = 0; i < 3; i++) {
             OLED_ShowString(50, 2, "Q ^ Q");
             delay_ms(350);
