@@ -79,7 +79,7 @@ float tilt_angle_limit = 60.0f;     // 倾斜角阈值（度）
 
 // ---------- 飞行控制 ----------
 float safety_delay_sec = 5.0f;      // 发射后强制开仓延时（时间保险/秒）
-float startAcc = 10.0f;             // 起飞加速度阈值（m/s²）
+float startAcc = 5.0f;             // 起飞加速度阈值（m/s²）
 
 // ---------- 舵机物理限制 & 方向 ----------
 float servo_angle_limit = 30.0f;    // 姿态舵机最大偏转角度（度）
